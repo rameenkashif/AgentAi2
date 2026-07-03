@@ -227,7 +227,7 @@ def gen_survey_apex():
                     segyio.TraceField.CROSSLINE_3D: int(xl),
                     segyio.TraceField.TRACE_SEQUENCE_FILE: tr_idx + 1,
                     segyio.TraceField.DelayRecordingTime: 0,
-                    segyio.TraceField.SAMPLE_COUNT: n_samples,
+                    segyio.TraceField.TRACE_SAMPLE_COUNT: n_samples,
                     segyio.TraceField.TRACE_SAMPLE_INTERVAL: dt_us,
                 }
                 f.trace[tr_idx] = trace.astype(np.float32)

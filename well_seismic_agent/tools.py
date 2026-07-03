@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import lasio
 import segyio
-from langchain.tools import StructuredTool
+from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 
