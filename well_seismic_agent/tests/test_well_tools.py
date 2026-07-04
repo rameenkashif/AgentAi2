@@ -22,6 +22,9 @@ from tools import (
     list_available_curves,
     get_curve_stats,
     flag_well_anomalies,
+    find_pay_zones,
+    cluster_pay_zones,
+    find_best_well_region,
 )
 
 # ---------------------------------------------------------------------------
@@ -154,3 +157,186 @@ class TestFlagWellAnomalies:
     def test_invalid_curve_raises(self, well_alpha_path):
         with pytest.raises(ValueError):
             flag_well_anomalies(well_alpha_path, "GHOST", 50.0)
+
+
+class TestFindPayZones:
+    def test_z02_pay_zone_detected(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(
+            well_file,
+            vsh_max=0.25,
+            phie_min=0.02,
+            swe_max=0.8,
+            resistivity_min=80.0,
+            top_n=200,
+        )
+        assert result["intervals"], "Expected at least one pay zone interval"
+        assert result["total_qualifying_intervals"] >= len(result["intervals"])
+        assert any(
+            iv["depth_start_m"] <= 3670.0 <= iv["depth_end_m"] or
+            iv["depth_start_m"] <= 3676.0 <= iv["depth_end_m"]
+            for iv in result["intervals"]
+        ), "Expected a pay zone interval covering 3670-3676 m"
+        for iv in result["intervals"]:
+            assert iv["mean_vsh"] <= 0.25
+            assert iv["mean_phie"] >= 0.02
+            assert iv["mean_swe"] <= 0.8
+            assert iv["mean_resistivity"] >= 80.0
+
+    def test_sorted_by_quality_score_descending(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(well_file)
+        scores = [iv["quality_score"] for iv in result["intervals"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_top_n_limits_returned_intervals(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(well_file, top_n=3)
+        assert len(result["intervals"]) == 3
+        assert result["total_qualifying_intervals"] >= 3
+
+    def test_total_qualifying_count_is_reported(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(well_file, top_n=2)
+        assert result["total_qualifying_intervals"] >= len(result["intervals"])
+        assert result["total_qualifying_intervals"] > 2
+
+    def test_best_interval_in_strongest_3654_3656_zone(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(
+            well_file,
+            vsh_max=0.25,
+            phie_min=0.02,
+            swe_max=0.8,
+            resistivity_min=80.0,
+            top_n=1,
+        )
+        assert result["intervals"], "Expected at least one pay zone interval"
+        best = result["intervals"][0]
+        assert 3654.0 <= best["depth_start_m"] <= 3656.5 or 3654.0 <= best["depth_end_m"] <= 3656.5
+        assert best["mean_vsh"] <= 0.03
+        assert best["mean_phie"] >= 0.10
+        assert best["mean_swe"] <= 0.10
+        assert best["mean_resistivity"] >= 1900
+
+    def test_missing_required_curve_raises(self, well_alpha_path):
+        with pytest.raises(ValueError, match="missing required curves"):
+            find_pay_zones(well_alpha_path)
+
+    def test_empty_result_for_strict_thresholds(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = find_pay_zones(
+            well_file,
+            vsh_max=0.01,
+            phie_min=0.5,
+            swe_max=0.2,
+            resistivity_min=1000.0,
+        )
+        assert result["intervals"] == []
+        assert result["total_qualifying_intervals"] == 0
+
+
+class TestClusterPayZones:
+    def test_merge_adjacent_intervals_into_single_cluster(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = cluster_pay_zones(
+            well_file,
+            vsh_max=0.25,
+            phie_min=0.02,
+            swe_max=0.8,
+            resistivity_min=80.0,
+            top_n=20,
+        )
+        clusters = result["clusters"]
+        assert result["total_clusters_found"] >= len(clusters)
+        overlapping_clusters = [
+            c for c in clusters
+            if c["depth_start_m"] <= 3656.0 and c["depth_end_m"] >= 3654.0
+        ]
+        assert len(overlapping_clusters) == 1, "Expected adjacent pay-zone intervals around 3654-3656m to merge into a single cluster"
+        cluster = overlapping_clusters[0]
+        assert cluster["depth_start_m"] <= 3654.0
+        assert cluster["depth_end_m"] >= 3656.0
+        assert cluster["total_thickness_m"] > 2.0
+
+    def test_clusters_sorted_by_quality_score_descending(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result = cluster_pay_zones(well_file)
+        scores = [c["quality_score"] for c in result["clusters"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_default_max_gap_is_two_times_step(self):
+        well_file = os.path.join(os.path.dirname(__file__), "..", "data", "wells", "Z-02.las")
+        result_default = cluster_pay_zones(
+            well_file,
+            vsh_max=0.25,
+            phie_min=0.02,
+            swe_max=0.8,
+            resistivity_min=80.0,
+            top_n=5,
+        )
+        result_small = cluster_pay_zones(
+            well_file,
+            max_gap_m=0.1,
+            vsh_max=0.25,
+            phie_min=0.02,
+            swe_max=0.8,
+            resistivity_min=80.0,
+            top_n=5,
+        )
+        assert result_default["total_clusters_found"] <= result_small["total_clusters_found"], \
+            "Default max_gap_m should merge at least as many clusters as a small explicit gap"
+
+
+class TestFindBestWellRegion:
+    def test_find_best_well_region_returns_best_matching_well(self):
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        result = find_best_well_region(
+            data_dir,
+            well_pattern="Z-0*",
+            top_n=3,
+            vsh_max=0.1,
+            phie_min=0.08,
+            swe_max=0.8,
+            resistivity_min=200,
+        )
+        assert result["best_well"] is not None
+        assert result["best_well_file"].endswith(".las")
+        assert result["wells_compared"] > 0
+        assert result["top_clusters"]
+        assert result["top_clusters"] == sorted(
+            result["top_clusters"], key=lambda c: c["quality_score"], reverse=True
+        )
+
+    def test_top_clusters_all_from_best_well(self):
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        result = find_best_well_region(
+            data_dir,
+            well_pattern="Z-0*",
+            top_n=5,
+            vsh_max=0.1,
+            phie_min=0.08,
+            swe_max=0.8,
+            resistivity_min=200,
+        )
+        best_file = result["best_well_file"]
+        for cluster in result["top_clusters"]:
+            assert best_file.endswith(".las")
+        assert all(
+            cluster["quality_score"] <= result["peak_quality_score"]
+            for cluster in result["top_clusters"]
+        )
+
+    def test_skipped_wells_captured_instead_of_crashing(self):
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        result = find_best_well_region(
+            data_dir,
+            well_pattern="Z-0*",
+            top_n=1,
+            vsh_max=0.1,
+            phie_min=0.08,
+            swe_max=0.8,
+            resistivity_min=500,
+        )
+        assert isinstance(result["skipped_wells"], list)
+        assert all("reason" in item for item in result["skipped_wells"])

@@ -10,6 +10,7 @@ turn them into tools the LangGraph agent can call.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import glob
 import re
@@ -274,7 +275,342 @@ def flag_well_anomalies(well_file: str, curve_name: str,
 
 
 # ===========================================================================
-# ── 6. get_seismic_survey_info ─────────────────────────────────────────────
+# ── 6. find_pay_zones ──────────────────────────────────────────────────────
+# ===========================================================================
+
+def _score_interval(mean_vsh: float, mean_phie: float,
+                    mean_swe: float, mean_resistivity: float) -> float:
+    """Score a pay-zone interval by porosity, saturation, shale content, and resistivity.
+
+    Weights are chosen so usable porosity and hydrocarbon saturation drive the score,
+    while shale content and normalized resistivity still contribute without raw resistivity
+    overwhelming the result.
+    """
+    vsh_score = 1.0 - min(mean_vsh / 0.5, 1.0)
+    phie_score = min(mean_phie / 0.20, 1.0)
+    swe_score = 1.0 - min(mean_swe / 1.0, 1.0)
+    resistivity_score = min(mean_resistivity, 2000.0) / 2000.0
+
+    return (
+        0.25 * phie_score
+        + 0.25 * swe_score
+        + 0.15 * vsh_score
+        + 0.35 * resistivity_score
+    )
+
+
+def _get_las_depth_step(well_file: str) -> float:
+    las = lasio.read(well_file)
+    step_value = None
+    if hasattr(las.well.get("STEP", None), "value"):
+        try:
+            step_value = float(las.well.get("STEP").value)
+        except Exception:
+            step_value = None
+
+    if step_value is not None and step_value > 0:
+        return step_value
+
+    df = las.df().reset_index()
+    depths = df.iloc[:, 0].astype(float).values
+    if len(depths) < 2:
+        raise ValueError(f"Unable to determine depth step for {well_file}.")
+    return float(np.median(np.diff(depths)))
+
+
+def _merge_cluster_values(cluster: dict, interval: dict) -> dict:
+    total_count = cluster["sample_count"] + interval["sample_count"]
+    return {
+        "depth_start_m": cluster["depth_start_m"],
+        "depth_end_m": interval["depth_end_m"],
+        "sample_count": total_count,
+        "mean_vsh": round(
+            (
+                cluster["mean_vsh"] * cluster["sample_count"]
+                + interval["mean_vsh"] * interval["sample_count"]
+            ) / total_count,
+            6,
+        ),
+        "mean_phie": round(
+            (
+                cluster["mean_phie"] * cluster["sample_count"]
+                + interval["mean_phie"] * interval["sample_count"]
+            ) / total_count,
+            6,
+        ),
+        "mean_swe": round(
+            (
+                cluster["mean_swe"] * cluster["sample_count"]
+                + interval["mean_swe"] * interval["sample_count"]
+            ) / total_count,
+            6,
+        ),
+        "mean_resistivity": round(
+            (
+                cluster["mean_resistivity"] * cluster["sample_count"]
+                + interval["mean_resistivity"] * interval["sample_count"]
+            ) / total_count,
+            4,
+        ),
+        "quality_score": round(
+            (
+                cluster["quality_score"] * cluster["sample_count"]
+                + interval["quality_score"] * interval["sample_count"]
+            ) / total_count,
+            6,
+        ),
+    }
+
+
+def cluster_pay_zones(
+    well_file: str,
+    max_gap_m: float = None,
+    top_n: int = 10,
+    **find_pay_zones_kwargs,
+) -> dict:
+    """
+    Group nearby ranked pay-zone intervals into continuous clusters.
+
+    Uses the LAS step interval to default max_gap_m when not provided, and
+    returns the top_n clusters by weighted quality score.
+    """
+    if not os.path.isfile(well_file):
+        raise FileNotFoundError(f"Well file not found: {well_file}")
+
+    if max_gap_m is None:
+        max_gap_m = 2.0 * _get_las_depth_step(well_file)
+
+    kwargs = dict(find_pay_zones_kwargs)
+    kwargs.pop("top_n", None)
+    result = find_pay_zones(well_file, top_n=None, **kwargs)
+    intervals = result.get("intervals", [])
+    if not intervals:
+        raise ValueError(
+            f"No qualifying pay-zone intervals found in {os.path.basename(well_file)}."
+        )
+
+    ordered = sorted(intervals, key=lambda iv: iv["depth_start_m"])
+    clusters: list[dict] = []
+    current = ordered[0].copy()
+
+    for interval in ordered[1:]:
+        if interval["depth_start_m"] - current["depth_end_m"] <= max_gap_m:
+            current = _merge_cluster_values(current, interval)
+        else:
+            current["total_thickness_m"] = round(
+                current["depth_end_m"] - current["depth_start_m"], 6
+            )
+            clusters.append(current)
+            current = interval.copy()
+
+    current["total_thickness_m"] = round(
+        current["depth_end_m"] - current["depth_start_m"], 6
+    )
+    clusters.append(current)
+
+    clusters.sort(key=lambda iv: iv["quality_score"], reverse=True)
+    total_clusters_found = len(clusters)
+    returned_clusters = clusters[:top_n] if top_n is not None else clusters
+
+    return {
+        "total_clusters_found": total_clusters_found,
+        "clusters": returned_clusters,
+    }
+
+
+def find_best_well_region(
+    data_dir: str,
+    well_pattern: str = "*",
+    top_n: int = 5,
+    **cluster_kwargs,
+) -> dict:
+    """
+    Discover the strongest well matching well_pattern and return that well's top clusters.
+
+    This identifies the single best-performing well first, then returns only its top clusters.
+    """
+    wells = list_wells(data_dir)
+    matching = [w for w in wells if fnmatch.fnmatch(w["well_name"], well_pattern)]
+    if not matching:
+        raise ValueError(
+            f"No wells matched pattern '{well_pattern}' in {data_dir}."
+        )
+
+    best_well = None
+    best_cluster = None
+    skipped_wells: list[dict] = []
+    wells_compared = 0
+
+    for well in matching:
+        well_name = well["well_name"]
+        well_file = well["filename"]
+        try:
+            local_kwargs = dict(cluster_kwargs)
+            local_kwargs.pop("top_n", None)
+            peak = cluster_pay_zones(well_file, top_n=1, **local_kwargs)
+            clusters = peak.get("clusters", [])
+            if not clusters:
+                raise ValueError(f"No clusters returned for {well_name}.")
+            wells_compared += 1
+            cluster = clusters[0]
+            if best_cluster is None or cluster["quality_score"] > best_cluster["quality_score"]:
+                best_cluster = cluster
+                best_well = {
+                    "well_name": well_name,
+                    "well_file": well_file,
+                }
+        except Exception as exc:
+            skipped_wells.append({
+                "well_name": well_name,
+                "well_file": well_file,
+                "reason": str(exc),
+            })
+
+    if best_well is None or best_cluster is None:
+        raise ValueError(
+            f"No valid wells were found for pattern '{well_pattern}'. "
+            f"Skipped wells: {[s['well_name'] for s in skipped_wells]}"
+        )
+
+    local_kwargs = dict(cluster_kwargs)
+    local_kwargs.pop("top_n", None)
+    top_clusters_result = cluster_pay_zones(
+        best_well["well_file"], top_n=top_n, **local_kwargs
+    )
+
+    return {
+        "best_well": best_well["well_name"],
+        "best_well_file": best_well["well_file"],
+        "peak_quality_score": best_cluster["quality_score"],
+        "top_clusters": top_clusters_result.get("clusters", []),
+        "wells_compared": wells_compared,
+        "skipped_wells": skipped_wells,
+    }
+
+
+def find_pay_zones(
+    well_file: str,
+    vsh_max: float = 0.25,
+    phie_min: float = 0.02,
+    swe_max: float = 0.8,
+    resistivity_min: float = 80.0,
+    top_n: int = 10,
+) -> dict:
+    """
+    Return ranked pay zone candidates where VSH, PHIE, SWE, and RESISTIVITY
+    meet the provided thresholds.
+
+    Intervals are merged when qualifying depths are within one depth STEP of each other.
+    Returns the best scoring intervals first plus the total count of qualifying intervals
+    before truncation by top_n.
+    """
+    if not os.path.isfile(well_file):
+        raise FileNotFoundError(f"Well file not found: {well_file}")
+
+    las = lasio.read(well_file)
+    available = [c.mnemonic.upper() for c in las.curves]
+    required = ["VSH", "PHIE", "SWE", "RESISTIVITY"]
+    missing = [c for c in required if c not in available]
+    if missing:
+        raise ValueError(
+            f"Well file {os.path.basename(well_file)} is missing required curves: "
+            f"{', '.join(missing)}"
+        )
+
+    df = las.df().reset_index()
+    depth_col = df.columns[0]
+    df = df.rename(columns={depth_col: "DEPT"})
+    df.columns = [c.upper() for c in df.columns]
+
+    null_value = -999.25
+    if hasattr(las.well.get("NULL", None), "value"):
+        null_value = las.well.get("NULL").value
+
+    for curve in required:
+        df[curve] = df[curve].replace(null_value, np.nan)
+
+    # Only accept rows where all required curves are valid
+    valid = df[required].notna().all(axis=1)
+    condition = (
+        (df["VSH"] <= vsh_max)
+        & (df["PHIE"] >= phie_min)
+        & (df["SWE"] <= swe_max)
+        & (df["RESISTIVITY"] >= resistivity_min)
+        & valid
+    )
+
+    depths = df["DEPT"].values.astype(float)
+    if len(depths) < 2:
+        return {"total_qualifying_intervals": 0, "intervals": []}
+
+    step = float(np.median(np.diff(depths)))
+    max_gap = step + 1e-6
+
+    intervals: list[dict] = []
+    indices = np.where(condition)[0]
+    if len(indices) == 0:
+        return {"total_qualifying_intervals": 0, "intervals": []}
+
+    start_idx = indices[0]
+    prev_idx = start_idx
+
+    for idx in indices[1:]:
+        if depths[idx] - depths[prev_idx] <= max_gap:
+            prev_idx = idx
+            continue
+
+        segment = df.loc[start_idx:prev_idx]
+        mean_vsh = round(float(segment["VSH"].mean()), 6)
+        mean_phie = round(float(segment["PHIE"].mean()), 6)
+        mean_swe = round(float(segment["SWE"].mean()), 6)
+        mean_resistivity = round(float(segment["RESISTIVITY"].mean()), 4)
+        intervals.append({
+            "depth_start_m": float(depths[start_idx]),
+            "depth_end_m": float(depths[prev_idx]),
+            "sample_count": int(len(segment)),
+            "mean_vsh": mean_vsh,
+            "mean_phie": mean_phie,
+            "mean_swe": mean_swe,
+            "mean_resistivity": mean_resistivity,
+            "quality_score": round(
+                _score_interval(mean_vsh, mean_phie, mean_swe, mean_resistivity),
+                6,
+            ),
+        })
+        start_idx = idx
+        prev_idx = idx
+
+    segment = df.loc[start_idx:prev_idx]
+    mean_vsh = round(float(segment["VSH"].mean()), 6)
+    mean_phie = round(float(segment["PHIE"].mean()), 6)
+    mean_swe = round(float(segment["SWE"].mean()), 6)
+    mean_resistivity = round(float(segment["RESISTIVITY"].mean()), 4)
+    intervals.append({
+        "depth_start_m": float(depths[start_idx]),
+        "depth_end_m": float(depths[prev_idx]),
+        "sample_count": int(len(segment)),
+        "mean_vsh": mean_vsh,
+        "mean_phie": mean_phie,
+        "mean_swe": mean_swe,
+        "mean_resistivity": mean_resistivity,
+        "quality_score": round(
+            _score_interval(mean_vsh, mean_phie, mean_swe, mean_resistivity),
+            6,
+        ),
+    })
+
+    intervals.sort(key=lambda iv: iv["quality_score"], reverse=True)
+    total_qualifying = len(intervals)
+    returned_intervals = intervals[:top_n] if top_n is not None else intervals
+
+    return {
+        "total_qualifying_intervals": total_qualifying,
+        "intervals": returned_intervals,
+    }
+
+
+# ===========================================================================
+# ── 7. get_seismic_survey_info ─────────────────────────────────────────────
 # ===========================================================================
 
 def get_seismic_survey_info(seismic_file: str) -> dict:
@@ -418,6 +754,32 @@ class SeismicAmpInput(BaseModel):
     time_min_ms: float = Field(..., description="Start of time window in milliseconds")
     time_max_ms: float = Field(..., description="End of time window in milliseconds")
 
+class FindPayZonesInput(BaseModel):
+    well_file: str = Field(..., description="Absolute path to the LAS file")
+    vsh_max: float = Field(0.25, description="Maximum shale fraction allowed")
+    phie_min: float = Field(0.02, description="Minimum effective porosity")
+    swe_max: float = Field(0.8, description="Maximum water saturation")
+    resistivity_min: float = Field(80.0, description="Minimum resistivity in Ohm·m")
+    top_n: int = Field(10, description="Maximum number of ranked candidate intervals to return")
+
+class ClusterPayZonesInput(BaseModel):
+    well_file: str = Field(..., description="Absolute path to the LAS file")
+    max_gap_m: float = Field(None, description="Maximum allowed gap between intervals to merge into a cluster")
+    top_n: int = Field(10, description="Maximum number of top clusters to return")
+    vsh_max: float = Field(0.25, description="Maximum shale fraction allowed")
+    phie_min: float = Field(0.02, description="Minimum effective porosity")
+    swe_max: float = Field(0.8, description="Maximum water saturation")
+    resistivity_min: float = Field(80.0, description="Minimum resistivity in Ohm·m")
+
+class FindBestWellRegionInput(BaseModel):
+    data_dir: str = Field(..., description="Absolute path to the data root directory")
+    well_pattern: str = Field("*", description="Filename pattern to match well names, e.g. 'Z-0*'")
+    top_n: int = Field(5, description="Number of top clusters to return for the best well")
+    vsh_max: float = Field(0.25, description="Maximum shale fraction allowed")
+    phie_min: float = Field(0.02, description="Minimum effective porosity")
+    swe_max: float = Field(0.8, description="Maximum water saturation")
+    resistivity_min: float = Field(80.0, description="Minimum resistivity in Ohm·m")
+
 
 # ===========================================================================
 # ── LangChain StructuredTool wrappers ──────────────────────────────────────
@@ -493,6 +855,36 @@ get_seismic_amplitude_stats_tool = StructuredTool.from_function(
     args_schema=SeismicAmpInput,
 )
 
+find_pay_zones_tool = StructuredTool.from_function(
+    func=find_pay_zones,
+    name="find_pay_zones",
+    description=(
+        "Identify and rank pay-zone candidate intervals in a LAS well file using VSH, PHIE, SWE, and RESISTIVITY thresholds. "
+        "Returns the top_n best-scoring merged depth intervals with average log values and a total qualifying count."
+    ),
+    args_schema=FindPayZonesInput,
+)
+
+cluster_pay_zones_tool = StructuredTool.from_function(
+    func=cluster_pay_zones,
+    name="cluster_pay_zones",
+    description=(
+        "Group nearby ranked pay-zone intervals into continuous clusters. "
+        "Use this when the user asks for sustained intervals, continuous pay zones, or merged zone estimates."
+    ),
+    args_schema=ClusterPayZonesInput,
+)
+
+find_best_well_region_tool = StructuredTool.from_function(
+    func=find_best_well_region,
+    name="find_best_well_region",
+    description=(
+        "Find the single best performing well among matching wells and return that well's top clusters. "
+        "Use this for questions like 'best zone across my wells' or 'which region is best and what are its zones'."
+    ),
+    args_schema=FindBestWellRegionInput,
+)
+
 
 # Convenience list imported by agent.py
 ALL_TOOLS = [
@@ -503,4 +895,7 @@ ALL_TOOLS = [
     flag_well_anomalies_tool,
     get_seismic_survey_info_tool,
     get_seismic_amplitude_stats_tool,
+    find_pay_zones_tool,
+    cluster_pay_zones_tool,
+    find_best_well_region_tool,
 ]
