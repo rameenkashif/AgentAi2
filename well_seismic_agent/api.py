@@ -15,7 +15,9 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+import base64 as _base64
 
 from agent import ask
 
@@ -96,6 +98,24 @@ def ask_endpoint(body: AskRequest):
         answer=answer,
         elapsed_seconds=round(time.perf_counter() - t0, 2),
     )
+
+
+@app.get("/plot/{well_name}", summary="Get well log plot as PNG")
+def plot_endpoint(well_name: str):
+    """
+    Returns a PNG image of the 3-track log plot (GR, Resistivity, PHIE/SWE)
+    with the best pay zone shaded, for the given well name (e.g. Z-02).
+    """
+    from tools import generate_log_plot
+    well_file = f"data/wells/{well_name}.las"
+    try:
+        b64_png = generate_log_plot(well_file)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Well '{well_name}' not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    png_bytes = _base64.b64decode(b64_png)
+    return Response(content=png_bytes, media_type="image/png")
 
 
 @app.get("/tools", summary="List available agent tools")

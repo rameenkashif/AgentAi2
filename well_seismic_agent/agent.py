@@ -52,7 +52,7 @@ DATA_DIR = os.environ.get("DATA_DIR", os.path.join(_HERE, "data"))
 # Build the agent
 # ---------------------------------------------------------------------------
 _LLM = ChatAnthropic(
-    model="claude-3-5-sonnet-20241022",
+    model="claude-sonnet-4-6",
     api_key=ANTHROPIC_API_KEY,
     temperature=0,
     max_tokens=2048,

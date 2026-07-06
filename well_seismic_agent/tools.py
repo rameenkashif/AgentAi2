@@ -780,6 +780,85 @@ class FindBestWellRegionInput(BaseModel):
     swe_max: float = Field(0.8, description="Maximum water saturation")
     resistivity_min: float = Field(80.0, description="Minimum resistivity in Ohm·m")
 
+import io
+import base64
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend, safe for server use
+import matplotlib.pyplot as plt
+
+
+def generate_log_plot(well_file: str, vsh_max: float = 0.25,
+                       phie_min: float = 0.02, swe_max: float = 0.8,
+                       resistivity_min: float = 80.0) -> str:
+    """
+    Generate a 3-track well log plot (GR/Vsh, Resistivity, PHIE/Swe)
+    with the best pay zone interval shaded, returned as a base64 PNG string.
+
+    Raises:
+        FileNotFoundError – if the file doesn't exist
+        ValueError        – if required curves are missing
+    """
+    if not os.path.isfile(well_file):
+        raise FileNotFoundError(f"Well file not found: {well_file}")
+
+    las = lasio.read(well_file)
+    available = [c.mnemonic.upper() for c in las.curves]
+    required = ["GR", "VSH", "PHIE", "SWE", "RESISTIVITY"]
+    missing = [c for c in required if c not in available]
+    if missing:
+        raise ValueError(
+            f"Well file {os.path.basename(well_file)} is missing required curves: "
+            f"{', '.join(missing)}"
+        )
+
+    df = las.df().reset_index()
+    depth_col = df.columns[0]
+    df = df.rename(columns={depth_col: "DEPT"})
+    df.columns = [c.upper() for c in df.columns]
+
+    null_value = -999.25
+    if hasattr(las.well.get("NULL", None), "value"):
+        null_value = las.well.get("NULL").value
+    for curve in required:
+        df[curve] = df[curve].replace(null_value, np.nan)
+
+    pay = find_pay_zones(well_file, vsh_max, phie_min, swe_max, resistivity_min, top_n=1)
+    best_zone = pay["intervals"][0] if pay["intervals"] else None
+
+    fig, axes = plt.subplots(1, 3, figsize=(9, 10), sharey=True)
+    depth = df["DEPT"]
+
+    # Track 1: GR
+    axes[0].plot(df["GR"], depth, color="green", linewidth=0.8)
+    axes[0].set_xlabel("GR (API)")
+    axes[0].set_ylabel("Depth (m)")
+    axes[0].invert_yaxis()
+
+    # Track 2: Resistivity (log scale)
+    axes[1].plot(df["RESISTIVITY"], depth, color="red", linewidth=0.8)
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel("Resistivity (Ohm.m)")
+
+    # Track 3: PHIE / SWE
+    axes[2].plot(df["PHIE"], depth, color="blue", linewidth=0.8, label="PHIE")
+    axes[2].plot(df["SWE"], depth, color="black", linewidth=0.8, linestyle="--", label="SWE")
+    axes[2].set_xlabel("PHIE / SWE (frac)")
+    axes[2].legend(fontsize=7, loc="upper right")
+
+    if best_zone:
+        for ax in axes:
+            ax.axhspan(best_zone["depth_start_m"], best_zone["depth_end_m"],
+                       color="orange", alpha=0.25)
+
+    well_name = os.path.basename(well_file).replace(".las", "")
+    fig.suptitle(f"Well {well_name} — Log Tracks", fontsize=12)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
 
 # ===========================================================================
 # ── LangChain StructuredTool wrappers ──────────────────────────────────────

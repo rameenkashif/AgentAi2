@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PayZone AI</title>
+<style>
+  :root {
+    --bg: #0b1210;
+    --panel: #111b18;
+    --panel-border: #223530;
+    --text: #e8ece9;
+    --text-dim: #9db3ab;
+    --accent: #c98a3e;
+    --accent-dim: #8a6431;
+    --resistivity: #4fb8a6;
+    --mono: 'JetBrains Mono', 'Courier New', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 22px 40px;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, rgba(201,138,62,0.04), transparent);
+  }
+
+  .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .brand-name {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text);
+  }
+
+  .brand-name span {
+    color: var(--accent);
+  }
+
+  .brand-tag {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  header img {
+    height: 34px;
+    object-fit: contain;
+  }
+
+  main {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+
+  .intro {
+    color: var(--text-dim);
+    font-size: 14px;
+    margin-bottom: 28px;
+    line-height: 1.6;
+  }
+
+  .input-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 32px;
+  }
+
+  #question {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    color: var(--text);
+    font-size: 15px;
+    font-family: var(--sans);
+    resize: none;
+  }
+
+  #question:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+  }
+
+  #ask-btn {
+    background: var(--accent);
+    color: #1a1108;
+    border: none;
+    border-radius: 8px;
+    padding: 0 26px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  #ask-btn:hover { background: #dd9b4d; }
+  #ask-btn:disabled { background: var(--accent-dim); cursor: not-allowed; }
+
+  #status {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--resistivity);
+    margin-bottom: 20px;
+    min-height: 18px;
+  }
+
+  .answer-panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--resistivity);
+    border-radius: 6px;
+    padding: 24px 28px;
+    display: none;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+
+  .answer-panel.visible { display: block; }
+
+  .answer-panel table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 13px;
+  }
+
+  .answer-panel th, .answer-panel td {
+    border: 1px solid var(--panel-border);
+    padding: 6px 10px;
+    text-align: left;
+  }
+
+  .answer-panel th {
+    color: var(--accent);
+    font-family: var(--mono);
+    font-weight: 600;
+  }
+
+  .answer-panel code {
+    background: rgba(255,255,255,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--mono);
+  }
+
+  .error-panel {
+    display: none;
+    color: #e0796f;
+    font-family: var(--mono);
+    font-size: 13px;
+    background: rgba(224,121,111,0.08);
+    border: 1px solid rgba(224,121,111,0.3);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+  }
+
+  .error-panel.visible { display: block; }
+
+  .plot-panel {
+    display: none;
+    margin-top: 20px;
+  }
+
+  .plot-panel.visible { display: block; }
+
+  .plot-panel .plot-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+  }
+
+  .plot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .plot-card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-top: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 14px;
+  }
+
+  .plot-card .plot-well-name {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+
+  .plot-card img {
+    width: 100%;
+    display: block;
+    border-radius: 4px;
+    background: #0d1614;
+  }
+
+  .plot-card .plot-error {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 20px 0;
+    text-align: center;
+  }
+
+  .examples {
+    margin-top: 40px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .examples span {
+    display: inline-block;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 20px;
+    padding: 6px 14px;
+    margin: 4px 6px 4px 0;
+    cursor: pointer;
+  }
+
+  .examples span:hover {
+    border-color: var(--accent-dim);
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-name">PayZone<span>AI</span></div>
+    <div class="brand-tag">Well Log &amp; Seismic Q&amp;A</div>
+  </div>
+  <img src="LMKR.jfif" alt="LMKR">
+</header>
+
+<main>
+  <p class="intro">
+    Ask a natural-language question about the well log or seismic data.
+    The agent will pull curve stats, flag anomalies, detect pay zones,
+    and rank wells to answer.
+  </p>
+
+  <div class="input-row">
+    <textarea id="question" rows="2" placeholder="e.g. Which well has the strongest pay zone, and why?"></textarea>
+    <button id="ask-btn">Ask</button>
+  </div>
+
+  <div id="status"></div>
+  <div class="error-panel" id="error"></div>
+  <div class="answer-panel" id="answer"></div>
+
+  <div class="plot-panel" id="plot-panel">
+    <div class="plot-label">Log tracks</div>
+    <div class="plot-grid" id="plot-grid"></div>
+  </div>
+
+  <div class="examples">
+    <span onclick="fillExample(this)">Which well has the strongest pay zone?</span>
+    <span onclick="fillExample(this)">What is the average GR in Z-02 between 3600 and 3700m?</span>
+    <span onclick="fillExample(this)">Flag anomalies in Z-04</span>
+  </div>
+</main>
+
+<script>
+  const API_URL = "https://friendly-halibut-4jj746p6p59425w76-8000.app.github.dev/ask";
+  const PLOT_BASE_URL = "https://friendly-halibut-4jj746p6p59425w76-8000.app.github.dev/plot";
+
+  const questionEl = document.getElementById("question");
+  const askBtn = document.getElementById("ask-btn");
+  const statusEl = document.getElementById("status");
+  const answerEl = document.getElementById("answer");
+  const errorEl = document.getElementById("error");
+  const plotPanelEl = document.getElementById("plot-panel");
+  const plotGridEl = document.getElementById("plot-grid");
+
+  function extractWellNames(text) {
+    // Matches well names like Z-02, Z-08, Well-Alpha, Well-Beta etc.
+    const matches = text.match(/\b(Z-\d{2}|Well-[A-Za-z]+)\b/g) || [];
+    return [...new Set(matches)];
+  }
+
+  async function loadPlots(wellNames) {
+    plotGridEl.innerHTML = "";
+    if (wellNames.length === 0) {
+      plotPanelEl.classList.remove("visible");
+      return;
+    }
+    plotPanelEl.classList.add("visible");
+
+    for (const well of wellNames) {
+      const card = document.createElement("div");
+      card.className = "plot-card";
+      card.innerHTML = `
+        <div class="plot-well-name">Well ${well}</div>
+        <div class="plot-error">Loading plot…</div>
+      `;
+      plotGridEl.appendChild(card);
+
+      try {
+        const res = await fetch(`${PLOT_BASE_URL}/${well}`);
+        if (!res.ok) throw new Error("Plot unavailable");
+        const blob = await res.blob();
+        const imgUrl = URL.createObjectURL(blob);
+        card.innerHTML = `
+          <div class="plot-well-name">Well ${well}</div>
+          <img src="${imgUrl}" alt="Log plot for well ${well}">
+        `;
+      } catch (err) {
+        card.innerHTML = `
+          <div class="plot-well-name">Well ${well}</div>
+          <div class="plot-error">No plot available for this well.</div>
+        `;
+      }
+    }
+  }
+
+  function fillExample(el) {
+    questionEl.value = el.textContent;
+    questionEl.focus();
+  }
+
+  function simpleMarkdownToHtml(text) {
+    // Minimal markdown handling: tables, bold, headers, line breaks
+    let html = text
+      .replace(/^### (.*$)/gim, '<h4>$1</h4>')
+      .replace(/^## (.*$)/gim, '<h3>$1</h3>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Convert markdown tables
+    const lines = html.split("\n");
+    let out = [];
+    let i = 0;
+    while (i < lines.length) {
+      if (lines[i].includes("|") && lines[i+1] && lines[i+1].match(/^\|?[\s:-]+\|/)) {
+        const headerCells = lines[i].split("|").map(c => c.trim()).filter(Boolean);
+        let tbl = "<table><thead><tr>" + headerCells.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+        i += 2;
+        while (i < lines.length && lines[i].includes("|")) {
+          const cells = lines[i].split("|").map(c => c.trim()).filter(Boolean);
+          tbl += "<tr>" + cells.map(c => `<td>${c}</td>`).join("") + "</tr>";
+          i++;
+        }
+        tbl += "</tbody></table>";
+        out.push(tbl);
+      } else {
+        out.push(lines[i]);
+        i++;
+      }
+    }
+    return out.join("<br>");
+  }
+
+  async function askQuestion() {
+    const question = questionEl.value.trim();
+    if (question.length < 5) {
+      statusEl.textContent = "";
+      errorEl.textContent = "Question must be at least 5 characters.";
+      errorEl.classList.add("visible");
+      return;
+    }
+
+    errorEl.classList.remove("visible");
+    answerEl.classList.remove("visible");
+    plotPanelEl.classList.remove("visible");
+    plotGridEl.innerHTML = "";
+    askBtn.disabled = true;
+    statusEl.textContent = "Running agent — calling tools and reasoning…";
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || "Request failed.");
+      }
+
+      statusEl.textContent = `Done in ${data.elapsed_seconds?.toFixed(1) ?? "?"}s`;
+      answerEl.innerHTML = simpleMarkdownToHtml(data.answer);
+      answerEl.classList.add("visible");
+
+      const wellNames = extractWellNames(data.answer + " " + question);
+      loadPlots(wellNames);
+
+    } catch (err) {
+      statusEl.textContent = "";
+      errorEl.textContent = err.message;
+      errorEl.classList.add("visible");
+    } finally {
+      askBtn.disabled = false;
+    }
+  }
+
+  askBtn.addEventListener("click", askQuestion);
+  questionEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      askQuestion();
+    }
+  });
+</script>
+
+</body>
+</html>
